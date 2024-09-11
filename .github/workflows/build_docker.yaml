@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths-ignore:
-      - 'README.md'
+      - "README.md"
   workflow_dispatch:
 
 env:
@@ -31,6 +31,10 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GHCR_PAT }}
 
+      - name: Generate image version
+        run: |
+          echo "VERSION_TAG=$(head -n1 RELEASE_NOTES)" >> $GITHUB_ENV
+
       - name: Build and push to GHCR
         uses: docker/build-push-action@v2
         with:
@@ -40,6 +44,6 @@ jobs:
           push: true
           tags: |
             ${{ env.GHCR_REPO }}:latest
-            ${{ env.GHCR_REPO }}:${{ github.sha }}
+            ${{ env.GHCR_REPO }}:${{ env.VERSION_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
