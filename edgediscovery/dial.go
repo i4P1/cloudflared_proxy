@@ -10,7 +10,7 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-// DialEdgeWithH2Mux makes a TLS connection to a Cloudflare edge node
+// DialEdge makes a TLS connection to a Cloudflare edge node
 func DialEdge(
 	ctx context.Context,
 	timeout time.Duration,
@@ -48,7 +48,7 @@ func DialEdge(
 	if err = tlsEdgeConn.Handshake(); err != nil {
 		return nil, newDialError(err, "TLS handshake with edge error")
 	}
-	// clear the deadline on the conn; h2mux has its own timeouts
+	// clear the deadline on the conn; http2 has its own timeouts
 	tlsEdgeConn.SetDeadline(time.Time{})
 	return tlsEdgeConn, nil
 }

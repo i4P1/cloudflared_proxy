@@ -1,3 +1,36 @@
+2024.11.0
+- 2024-11-05 VULN-66059: remove ssh server tests
+- 2024-11-04 TUN-8700: Add datagram v3 muxer
+- 2024-11-04 TUN-8646: Allow experimental feature support for datagram v3
+- 2024-11-04 TUN-8641: Expose methods to simplify V3 Datagram parsing on the edge
+- 2024-10-31 TUN-8708: Bump python min version to 3.10
+- 2024-10-31 TUN-8667: Add datagram v3 session manager
+- 2024-10-25 TUN-8692: remove dashes from session id
+- 2024-10-24 TUN-8694: Rework release script
+- 2024-10-24 TUN-8661: Refactor connection methods to support future different datagram muxing methods
+- 2024-07-22 TUN-8553: Bump go to 1.22.5 and go-boring 1.22.5-1
+
+2024.10.1
+- 2024-10-23 TUN-8694: Fix github release script
+- 2024-10-21 Revert "TUN-8592: Use metadata from the edge to determine if request body is empty for QUIC transport"
+- 2024-10-18 TUN-8688: Correct UDP bind for IPv6 edge connectivity on macOS
+- 2024-10-17 TUN-8685: Bump coredns dependency
+- 2024-10-16 TUN-8638: Add datagram v3 serializers and deserializers
+- 2024-10-15 chore: Remove h2mux code
+- 2024-10-11 TUN-8631: Abort release on version mismatch
+
+2024.10.0
+- 2024-10-01 TUN-8646: Add datagram v3 support feature flag
+- 2024-09-30 TUN-8621: Fix cloudflared version in change notes to account for release date
+- 2024-09-19 Adding semgrep yaml file
+- 2024-09-12 TUN-8632: Delay checking auto-update by the provided frequency
+- 2024-09-11 TUN-8630: Check checksum of downloaded binary to compare to current for auto-updating
+- 2024-09-09 TUN-8629: Cloudflared update on Windows requires running it twice to update
+- 2024-09-06 PPIP-2310: Update quick tunnel disclaimer
+- 2024-08-30 TUN-8621: Prevent QUIC connection from closing before grace period after unregistering
+- 2024-08-09 TUN-8592: Use metadata from the edge to determine if request body is empty for QUIC transport
+- 2024-06-26 TUN-8484: Print response when QuickTunnel can't be unmarshalled
+
 2024.9.1
 - 2024-09-10 Revert Release 2024.9.0
 
