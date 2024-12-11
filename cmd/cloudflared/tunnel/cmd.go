@@ -28,6 +28,7 @@ import (
 	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/credentials"
+	"github.com/cloudflare/cloudflared/diagnostic"
 	"github.com/cloudflare/cloudflared/edgediscovery"
 	"github.com/cloudflare/cloudflared/features"
 	"github.com/cloudflare/cloudflared/ingress"
@@ -39,6 +40,7 @@ import (
 	"github.com/cloudflare/cloudflared/supervisor"
 	"github.com/cloudflare/cloudflared/tlsconfig"
 	"github.com/cloudflare/cloudflared/tunneldns"
+	"github.com/cloudflare/cloudflared/tunnelstate"
 	"github.com/cloudflare/cloudflared/validation"
 )
 
@@ -125,6 +127,94 @@ var (
 		"most likely you already have a conflicting record there. You can also rerun this command with --%s to overwrite "+
 		"any existing DNS records for this hostname.", overwriteDNSFlag)
 	deprecatedClassicTunnelErr = fmt.Errorf("Classic tunnels have been deprecated, please use Named Tunnels. (https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/tunnel-guide/)")
+	// TODO: TUN-8756 the list below denotes the flags that do not possess any kind of sensitive information
+	// however this approach is not maintainble in the long-term.
+	nonSecretFlagsList = []string{
+		"config",
+		"autoupdate-freq",
+		"no-autoupdate",
+		"metrics",
+		"pidfile",
+		"url",
+		"hello-world",
+		"socks5",
+		"proxy-connect-timeout",
+		"proxy-tls-timeout",
+		"proxy-tcp-keepalive",
+		"proxy-no-happy-eyeballs",
+		"proxy-keepalive-connections",
+		"proxy-keepalive-timeout",
+		"proxy-connection-timeout",
+		"proxy-expect-continue-timeout",
+		"http-host-header",
+		"origin-server-name",
+		"unix-socket",
+		"origin-ca-pool",
+		"no-tls-verify",
+		"no-chunked-encoding",
+		"http2-origin",
+		"management-hostname",
+		"service-op-ip",
+		"local-ssh-port",
+		"ssh-idle-timeout",
+		"ssh-max-timeout",
+		"bucket-name",
+		"region-name",
+		"s3-url-host",
+		"host-key-path",
+		"ssh-server",
+		"bastion",
+		"proxy-address",
+		"proxy-port",
+		"loglevel",
+		"transport-loglevel",
+		"logfile",
+		"log-directory",
+		"trace-output",
+		"proxy-dns",
+		"proxy-dns-port",
+		"proxy-dns-address",
+		"proxy-dns-upstream",
+		"proxy-dns-max-upstream-conns",
+		"proxy-dns-bootstrap",
+		"is-autoupdated",
+		"edge",
+		"region",
+		"edge-ip-version",
+		"edge-bind-address",
+		"cacert",
+		"hostname",
+		"id",
+		"lb-pool",
+		"api-url",
+		"metrics-update-freq",
+		"tag",
+		"heartbeat-interval",
+		"heartbeat-count",
+		"max-edge-addr-retries",
+		"retries",
+		"ha-connections",
+		"rpc-timeout",
+		"write-stream-timeout",
+		"quic-disable-pmtu-discovery",
+		"quic-connection-level-flow-control-limit",
+		"quic-stream-level-flow-control-limit",
+		"label",
+		"grace-period",
+		"compression-quality",
+		"use-reconnect-token",
+		"dial-edge-timeout",
+		"stdin-control",
+		"name",
+		"ui",
+		"quick-service",
+		"max-fetch-size",
+		"post-quantum",
+		"management-diagnostics",
+		"protocol",
+		"overwrite-dns",
+		"help",
+	}
 )
 
 func Flags() []cli.Flag {
@@ -139,6 +229,7 @@ func Commands() []*cli.Command {
 		buildVirtualNetworkSubcommand(false),
 		buildRunCommand(),
 		buildListCommand(),
+		buildReadyCommand(),
 		buildInfoCommand(),
 		buildIngressSubcommand(),
 		buildDeleteCommand(),
@@ -419,7 +510,7 @@ func StartServer(
 
 	// Disable ICMP packet routing for quick tunnels
 	if quickTunnelURL != "" {
-		tunnelConfig.PacketConfig = nil
+		tunnelConfig.ICMPRouterServer = nil
 	}
 
 	internalRules := []ingress.Rule{}
@@ -447,19 +538,42 @@ func StartServer(
 		return err
 	}
 
-	metricsListener, err := listeners.Listen("tcp", c.String("metrics"))
+	metricsListener, err := metrics.CreateMetricsListener(&listeners, c.String("metrics"))
 	if err != nil {
 		log.Err(err).Msg("Error opening metrics server listener")
 		return errors.Wrap(err, "Error opening metrics server listener")
 	}
+
 	defer metricsListener.Close()
 	wg.Add(1)
+
 	go func() {
 		defer wg.Done()
-		readinessServer := metrics.NewReadyServer(log, clientID)
-		observer.RegisterSink(readinessServer)
+		tracker := tunnelstate.NewConnTracker(log)
+		observer.RegisterSink(tracker)
+
+		ipv4, ipv6, err := determineICMPSources(c, log)
+		sources := make([]string, 0)
+		if err == nil {
+			sources = append(sources, ipv4.String())
+			sources = append(sources, ipv6.String())
+		}
+
+		readinessServer := metrics.NewReadyServer(clientID, tracker)
+		diagnosticHandler := diagnostic.NewDiagnosticHandler(
+			log,
+			0,
+			diagnostic.NewSystemCollectorImpl(buildInfo.CloudflaredVersion),
+			tunnelConfig.NamedTunnel.Credentials.TunnelID,
+			clientID,
+			tracker,
+			c,
+			nonSecretFlagsList,
+			sources,
+		)
 		metricsConfig := metrics.Config{
 			ReadyServer:         readinessServer,
+			DiagnosticHandler:   diagnosticHandler,
 			QuickTunnelHostname: quickTunnelURL,
 			Orchestrator:        orchestrator,
 		}
@@ -856,9 +970,15 @@ func configureCloudflaredFlags(shouldHide bool) []cli.Flag {
 			Hidden:  shouldHide,
 		}),
 		altsrc.NewStringFlag(&cli.StringFlag{
-			Name:    "metrics",
-			Value:   "localhost:",
-			Usage:   "Listen address for metrics reporting.",
+			Name:  "metrics",
+			Value: metrics.GetMetricsDefaultAddress(metrics.Runtime),
+			Usage: fmt.Sprintf(
+				`Listen address for metrics reporting. If no address is passed cloudflared will try to bind to %v.
+If all are unavailable, a random port will be used. Note that when running cloudflared from an virtual
+environment the default address binds to all interfaces, hence, it is important to isolate the host
+and virtualized host network stacks from each other`,
+				metrics.GetMetricsKnownAddresses(metrics.Runtime),
+			),
 			EnvVars: []string{"TUNNEL_METRICS"},
 			Hidden:  shouldHide,
 		}),
