@@ -65,12 +65,11 @@ type datagramConn struct {
 	icmpRouter     ingress.ICMPRouter
 	metrics        Metrics
 	logger         *zerolog.Logger
-
-	datagrams  chan []byte
-	readErrors chan error
+	datagrams      chan []byte
+	readErrors     chan error
 
 	icmpEncoderPool sync.Pool // a pool of *packet.Encoder
-	icmpDecoder     *packet.ICMPDecoder
+	icmpDecoderPool sync.Pool
 }
 
 func NewDatagramConn(conn QuicConnection, sessionManager SessionManager, icmpRouter ingress.ICMPRouter, index uint8, metrics Metrics, logger *zerolog.Logger) DatagramConn {
@@ -89,7 +88,11 @@ func NewDatagramConn(conn QuicConnection, sessionManager SessionManager, icmpRou
 				return packet.NewEncoder()
 			},
 		},
-		icmpDecoder: packet.NewICMPDecoder(),
+		icmpDecoderPool: sync.Pool{
+			New: func() any {
+				return packet.NewICMPDecoder()
+			},
+		},
 	}
 }
 
@@ -139,8 +142,6 @@ func (c *datagramConn) SendICMPPacket(icmp *packet.ICMP) error {
 func (c *datagramConn) SendICMPTTLExceed(icmp *packet.ICMP, rawPacket packet.RawPacket) error {
 	return c.SendICMPPacket(c.icmpRouter.ConvertToTTLExceeded(icmp, rawPacket))
 }
-
-var errReadTimeout error = errors.New("receive datagram timeout")
 
 // pollDatagrams will read datagrams from the underlying connection until the provided context is done.
 func (c *datagramConn) pollDatagrams(ctx context.Context) {
@@ -253,8 +254,12 @@ func (c *datagramConn) handleSessionRegistrationDatagram(ctx context.Context, da
 		// Session is already registered but to a different connection
 		c.handleSessionMigration(datagram.RequestID, &log)
 		return
+	case ErrSessionRegistrationRateLimited:
+		// There are too many concurrent sessions so we return an error to force a retry later
+		c.handleSessionRegistrationRateLimited(datagram, &log)
+		return
 	default:
-		log.Err(err).Msgf("flow registration failure")
+		log.Err(err).Msg("flow registration failure")
 		c.handleSessionRegistrationFailure(datagram.RequestID, &log)
 		return
 	}
@@ -275,7 +280,7 @@ func (c *datagramConn) handleSessionRegistrationDatagram(ctx context.Context, da
 	// [Session.Serve] is blocking and will continue this go routine till the end of the session lifetime.
 	start := time.Now()
 	err = session.Serve(ctx)
-	elapsedMS := time.Now().Sub(start).Milliseconds()
+	elapsedMS := time.Since(start).Milliseconds()
 	log = log.With().Int64(logDurationKey, elapsedMS).Logger()
 	if err == nil {
 		// We typically don't expect a session to close without some error response. [SessionIdleErr] is the typical
@@ -343,6 +348,16 @@ func (c *datagramConn) handleSessionRegistrationFailure(requestID RequestID, log
 	}
 }
 
+func (c *datagramConn) handleSessionRegistrationRateLimited(datagram *UDPSessionRegistrationDatagram, logger *zerolog.Logger) {
+	c.logger.Warn().Msg("Too many concurrent sessions being handled, rejecting udp proxy")
+
+	rateLimitResponse := ResponseTooManyActiveFlows
+	err := c.SendUDPSessionResponse(datagram.RequestID, rateLimitResponse)
+	if err != nil {
+		logger.Err(err).Msgf("unable to send flow registration error response (%d)", rateLimitResponse)
+	}
+}
+
 // Handles incoming datagrams that need to be sent to a registered session.
 func (c *datagramConn) handleSessionPayloadDatagram(datagram *UDPSessionPayloadDatagram, logger *zerolog.Logger) {
 	s, err := c.sessionManager.GetSession(datagram.RequestID)
@@ -367,7 +382,16 @@ func (c *datagramConn) handleICMPPacket(datagram *ICMPDatagram) {
 
 	// Decode the provided ICMPDatagram as an ICMP packet
 	rawPacket := packet.RawPacket{Data: datagram.Payload}
-	icmp, err := c.icmpDecoder.Decode(rawPacket)
+	cachedDecoder := c.icmpDecoderPool.Get()
+	defer c.icmpDecoderPool.Put(cachedDecoder)
+	decoder, ok := cachedDecoder.(*packet.ICMPDecoder)
+	if !ok {
+		c.logger.Error().Msg("Could not get ICMPDecoder from the pool. Dropping packet")
+		return
+	}
+
+	icmp, err := decoder.Decode(rawPacket)
+
 	if err != nil {
 		c.logger.Err(err).Msgf("unable to marshal icmp packet")
 		return

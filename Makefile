@@ -133,11 +133,9 @@ clean:
 cloudflared:
 ifeq ($(FIPS), true)
 	$(info Building cloudflared with go-fips)
-	cp -f fips/fips.go.linux-amd64 cmd/cloudflared/fips.go
 endif
 	GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) $(ARM_COMMAND) go build -mod=vendor $(GO_BUILD_TAGS) $(LDFLAGS) $(IMPORT_PATH)/cmd/cloudflared
 ifeq ($(FIPS), true)
-	rm -f cmd/cloudflared/fips.go
 	./check-fips.sh cloudflared
 endif
 
@@ -255,4 +253,17 @@ vet:
 
 .PHONY: fmt
 fmt:
-	goimports -l -w -local github.com/cloudflare/cloudflared $$(go list -mod=vendor -f '{{.Dir}}' -a ./... | fgrep -v tunnelrpc/proto)
+	@goimports -l -w -local github.com/cloudflare/cloudflared $$(go list -mod=vendor -f '{{.Dir}}' -a ./... | fgrep -v tunnelrpc/proto)
+	@go fmt $$(go list -mod=vendor -f '{{.Dir}}' -a ./... | fgrep -v tunnelrpc/proto)
+
+.PHONY: fmt-check
+fmt-check:
+	@./fmt-check.sh
+
+.PHONY: lint
+lint:
+	@golangci-lint run
+
+.PHONY: mocks
+mocks:
+	go generate mocks/mockgen.go

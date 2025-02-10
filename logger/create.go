@@ -16,21 +16,13 @@ import (
 	"golang.org/x/term"
 	"gopkg.in/natefinch/lumberjack.v2"
 
-	"github.com/cloudflare/cloudflared/features"
+	cfdflags "github.com/cloudflare/cloudflared/cmd/cloudflared/flags"
 	"github.com/cloudflare/cloudflared/management"
 )
 
 const (
 	EnableTerminalLog  = false
 	DisableTerminalLog = true
-
-	LogLevelFlag          = "loglevel"
-	LogFileFlag           = "logfile"
-	LogDirectoryFlag      = "log-directory"
-	LogTransportLevelFlag = "transport-loglevel"
-
-	LogSSHDirectoryFlag = "log-directory"
-	LogSSHLevelFlag     = "log-level"
 
 	dirPermMode  = 0744 // rwxr--r--
 	filePermMode = 0644 // rw-r--r--
@@ -46,11 +38,7 @@ func init() {
 	zerolog.TimeFieldFormat = time.RFC3339
 	zerolog.TimestampFunc = utcNow
 
-	if features.Contains(features.FeatureManagementLogs) {
-		// Management logger needs to be initialized before any of the other loggers as to not capture
-		// it's own logging events.
-		ManagementLogger = management.NewLogger()
-	}
+	ManagementLogger = management.NewLogger()
 }
 
 func utcNow() time.Time {
@@ -124,10 +112,7 @@ func newZerolog(loggerConfig *Config) *zerolog.Logger {
 		writers = append(writers, rollingLogger)
 	}
 
-	var managementWriter zerolog.LevelWriter
-	if features.Contains(features.FeatureManagementLogs) {
-		managementWriter = ManagementLogger
-	}
+	managementWriter := ManagementLogger
 
 	level, levelErr := zerolog.ParseLevel(loggerConfig.MinLevel)
 	if levelErr != nil {
@@ -145,15 +130,15 @@ func newZerolog(loggerConfig *Config) *zerolog.Logger {
 }
 
 func CreateTransportLoggerFromContext(c *cli.Context, disableTerminal bool) *zerolog.Logger {
-	return createFromContext(c, LogTransportLevelFlag, LogDirectoryFlag, disableTerminal)
+	return createFromContext(c, cfdflags.TransportLogLevel, cfdflags.LogDirectory, disableTerminal)
 }
 
 func CreateLoggerFromContext(c *cli.Context, disableTerminal bool) *zerolog.Logger {
-	return createFromContext(c, LogLevelFlag, LogDirectoryFlag, disableTerminal)
+	return createFromContext(c, cfdflags.LogLevel, cfdflags.LogDirectory, disableTerminal)
 }
 
 func CreateSSHLoggerFromContext(c *cli.Context, disableTerminal bool) *zerolog.Logger {
-	return createFromContext(c, LogSSHLevelFlag, LogSSHDirectoryFlag, disableTerminal)
+	return createFromContext(c, cfdflags.LogLevelSSH, cfdflags.LogDirectory, disableTerminal)
 }
 
 func createFromContext(
@@ -163,7 +148,7 @@ func createFromContext(
 	disableTerminal bool,
 ) *zerolog.Logger {
 	logLevel := c.String(logLevelFlagName)
-	logFile := c.String(LogFileFlag)
+	logFile := c.String(cfdflags.LogFile)
 	logDirectory := c.String(logDirectoryFlagName)
 
 	loggerConfig := CreateConfig(
@@ -175,7 +160,7 @@ func createFromContext(
 
 	log := newZerolog(loggerConfig)
 	if incompatibleFlagsSet := logFile != "" && logDirectory != ""; incompatibleFlagsSet {
-		log.Error().Msgf("Your config includes values for both %s (%s) and %s (%s), but they are incompatible. %s takes precedence.", LogFileFlag, logFile, logDirectoryFlagName, logDirectory, LogFileFlag)
+		log.Error().Msgf("Your config includes values for both %s (%s) and %s (%s), but they are incompatible. %s takes precedence.", cfdflags.LogFile, logFile, logDirectoryFlagName, logDirectory, cfdflags.LogFile)
 	}
 	return log
 }
@@ -214,7 +199,6 @@ var (
 
 func createFileWriter(config FileConfig) (io.Writer, error) {
 	singleFileInit.once.Do(func() {
-
 		var logFile io.Writer
 		fullpath := config.Fullpath()
 
