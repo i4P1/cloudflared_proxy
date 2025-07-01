@@ -1,3 +1,18 @@
+2025.6.1
+- 2025-06-16 TUN-9467: add vulncheck to cloudflared
+- 2025-06-16 TUN-9495: Remove references to cloudflare-go
+- 2025-06-16 TUN-9371: Add logging format as JSON
+- 2025-06-12 TUN-9467: bump coredns to solve CVE
+
+2025.6.0
+- 2025-06-06 TUN-9016: update go to 1.24
+- 2025-06-05 TUN-9171: Use `is_default_network` instead of `is_default` to create vnet's
+
+2025.5.0
+- 2025-05-14 TUN-9319: Add dynamic loading of features to connections via ConnectionOptionsSnapshot
+- 2025-05-13 TUN-9322: Add metric for unsupported RPC commands for datagram v3
+- 2025-05-07 TUN-9291: Remove dynamic reloading of features for datagram v3
+
 2025.4.2
 - 2025-04-30 chore: Do not use gitlab merge request pipelines
 - 2025-04-30 DEVTOOLS-16383: Create GitlabCI pipeline to release Mac builds

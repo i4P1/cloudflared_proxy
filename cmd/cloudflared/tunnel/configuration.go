@@ -10,13 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"github.com/urfave/cli/v2"
 	"github.com/urfave/cli/v2/altsrc"
 	"golang.org/x/term"
 
+	"github.com/cloudflare/cloudflared/client"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/flags"
 	"github.com/cloudflare/cloudflared/config"
@@ -25,6 +25,7 @@ import (
 	"github.com/cloudflare/cloudflared/edgediscovery/allregions"
 	"github.com/cloudflare/cloudflared/features"
 	"github.com/cloudflare/cloudflared/ingress"
+	"github.com/cloudflare/cloudflared/ingress/origins"
 	"github.com/cloudflare/cloudflared/orchestration"
 	"github.com/cloudflare/cloudflared/supervisor"
 	"github.com/cloudflare/cloudflared/tlsconfig"
@@ -125,27 +126,29 @@ func prepareTunnelConfig(
 	observer *connection.Observer,
 	namedTunnel *connection.TunnelProperties,
 ) (*supervisor.TunnelConfig, *orchestration.Config, error) {
-	clientID, err := uuid.NewRandom()
+	transportProtocol := c.String(flags.Protocol)
+	isPostQuantumEnforced := c.Bool(flags.PostQuantum)
+	featureSelector, err := features.NewFeatureSelector(ctx, namedTunnel.Credentials.AccountTag, c.StringSlice(flags.Features), isPostQuantumEnforced, log)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "can't generate connector UUID")
+		return nil, nil, errors.Wrap(err, "Failed to create feature selector")
 	}
-	log.Info().Msgf("Generated Connector ID: %s", clientID)
+
+	clientConfig, err := client.NewConfig(info.Version(), info.OSArch(), featureSelector)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	log.Info().Msgf("Generated Connector ID: %s", clientConfig.ConnectorID)
+
 	tags, err := NewTagSliceFromCLI(c.StringSlice(flags.Tag))
 	if err != nil {
 		log.Err(err).Msg("Tag parse failure")
 		return nil, nil, errors.Wrap(err, "Tag parse failure")
 	}
-	tags = append(tags, pogs.Tag{Name: "ID", Value: clientID.String()})
+	tags = append(tags, pogs.Tag{Name: "ID", Value: clientConfig.ConnectorID.String()})
 
-	transportProtocol := c.String(flags.Protocol)
-	isPostQuantumEnforced := c.Bool(flags.PostQuantum)
-
-	featureSelector, err := features.NewFeatureSelector(ctx, namedTunnel.Credentials.AccountTag, c.StringSlice(flags.Features), c.Bool(flags.PostQuantum), log)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "Failed to create feature selector")
-	}
-	clientFeatures := featureSelector.ClientFeatures()
-	pqMode := featureSelector.PostQuantumMode()
+	clientFeatures := featureSelector.Snapshot()
+	pqMode := clientFeatures.PostQuantum
 	if pqMode == features.PostQuantumStrict {
 		// Error if the user tries to force a non-quic transport protocol
 		if transportProtocol != connection.AutoSelectFlag && transportProtocol != connection.QUIC.String() {
@@ -154,12 +157,6 @@ func prepareTunnelConfig(
 		transportProtocol = connection.QUIC.String()
 	}
 
-	namedTunnel.Client = pogs.ClientInfo{
-		ClientID: clientID[:],
-		Features: clientFeatures,
-		Version:  info.Version(),
-		Arch:     info.OSArch(),
-	}
 	cfg := config.GetConfiguration()
 	ingressRules, err := ingress.ParseIngressFromConfigAndCLI(cfg, c, log)
 	if err != nil {
@@ -223,11 +220,29 @@ func prepareTunnelConfig(
 		resolvedRegion = endpoint
 	}
 
+	warpRoutingConfig := ingress.NewWarpRoutingConfig(&cfg.WarpRouting)
+
+	// Setup origin dialer service and virtual services
+	originDialerService := ingress.NewOriginDialer(ingress.OriginConfig{
+		DefaultDialer:   ingress.NewDialer(warpRoutingConfig),
+		TCPWriteTimeout: c.Duration(flags.WriteStreamTimeout),
+	}, log)
+
+	// Setup DNS Resolver Service
+	dnsResolverAddrs := c.StringSlice(flags.VirtualDNSServiceResolverAddresses)
+	dnsService := origins.NewDNSResolverService(origins.NewDNSDialer(), log)
+	if len(dnsResolverAddrs) > 0 {
+		addrs, err := parseResolverAddrPorts(dnsResolverAddrs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid %s provided: %w", flags.VirtualDNSServiceResolverAddresses, err)
+		}
+		dnsService = origins.NewStaticDNSResolverService(addrs, origins.NewDNSDialer(), log)
+	}
+	originDialerService.AddReservedService(dnsService, []netip.AddrPort{origins.VirtualDNSServiceAddr})
+
 	tunnelConfig := &supervisor.TunnelConfig{
+		ClientConfig:    clientConfig,
 		GracePeriod:     gracePeriod,
-		ReplaceExisting: c.Bool(flags.Force),
-		OSArch:          info.OSArch(),
-		ClientID:        clientID.String(),
 		EdgeAddrs:       c.StringSlice(flags.Edge),
 		Region:          resolvedRegion,
 		EdgeIPVersion:   edgeIPVersion,
@@ -246,13 +261,14 @@ func prepareTunnelConfig(
 		NamedTunnel:                         namedTunnel,
 		ProtocolSelector:                    protocolSelector,
 		EdgeTLSConfigs:                      edgeTLSConfigs,
-		FeatureSelector:                     featureSelector,
 		MaxEdgeAddrRetries:                  uint8(c.Int(flags.MaxEdgeAddrRetries)), // nolint: gosec
 		RPCTimeout:                          c.Duration(flags.RpcTimeout),
 		WriteStreamTimeout:                  c.Duration(flags.WriteStreamTimeout),
 		DisableQUICPathMTUDiscovery:         c.Bool(flags.QuicDisablePathMTUDiscovery),
 		QUICConnectionLevelFlowControlLimit: c.Uint64(flags.QuicConnLevelFlowControlLimit),
 		QUICStreamLevelFlowControlLimit:     c.Uint64(flags.QuicStreamLevelFlowControlLimit),
+		OriginDNSService:                    dnsService,
+		OriginDialerService:                 originDialerService,
 	}
 	icmpRouter, err := newICMPRouter(c, log)
 	if err != nil {
@@ -261,10 +277,10 @@ func prepareTunnelConfig(
 		tunnelConfig.ICMPRouterServer = icmpRouter
 	}
 	orchestratorConfig := &orchestration.Config{
-		Ingress:            &ingressRules,
-		WarpRouting:        ingress.NewWarpRoutingConfig(&cfg.WarpRouting),
-		ConfigurationFlags: parseConfigFlags(c),
-		WriteTimeout:       tunnelConfig.WriteStreamTimeout,
+		Ingress:             &ingressRules,
+		WarpRouting:         warpRoutingConfig,
+		OriginDialerService: originDialerService,
+		ConfigurationFlags:  parseConfigFlags(c),
 	}
 	return tunnelConfig, orchestratorConfig, nil
 }
@@ -500,4 +516,20 @@ func findLocalAddr(dst net.IP, port int) (netip.Addr, error) {
 	}
 	localAddr := localAddrPort.Addr()
 	return localAddr, nil
+}
+
+func parseResolverAddrPorts(input []string) ([]netip.AddrPort, error) {
+	// We don't allow more than 10 resolvers to be provided statically for the resolver service.
+	if len(input) > 10 {
+		return nil, errors.New("too many addresses provided, max: 10")
+	}
+	addrs := make([]netip.AddrPort, 0, len(input))
+	for _, val := range input {
+		addr, err := netip.ParseAddrPort(val)
+		if err != nil {
+			return nil, err
+		}
+		addrs = append(addrs, addr)
+	}
+	return addrs, nil
 }

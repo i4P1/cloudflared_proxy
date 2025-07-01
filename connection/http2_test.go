@@ -20,19 +20,18 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
 
+	"github.com/cloudflare/cloudflared/client"
 	"github.com/cloudflare/cloudflared/tracing"
 
 	"github.com/cloudflare/cloudflared/tunnelrpc"
 	"github.com/cloudflare/cloudflared/tunnelrpc/pogs"
 )
 
-var (
-	testTransport = http2.Transport{}
-)
+var testTransport = http2.Transport{}
 
 func newTestHTTP2Connection() (*HTTP2Connection, net.Conn) {
 	edgeConn, cfdConn := net.Pipe()
-	var connIndex = uint8(0)
+	connIndex := uint8(0)
 	log := zerolog.Nop()
 	obs := NewObserver(&log, &log)
 	controlStream := NewControlStream(
@@ -51,7 +50,7 @@ func newTestHTTP2Connection() (*HTTP2Connection, net.Conn) {
 		cfdConn,
 		// OriginProxy is set in testConfigManager
 		testOrchestrator,
-		&pogs.ConnectionOptions{},
+		&client.ConnectionOptionsSnapshot{},
 		obs,
 		connIndex,
 		controlStream,
@@ -62,7 +61,7 @@ func newTestHTTP2Connection() (*HTTP2Connection, net.Conn) {
 func TestHTTP2ConfigurationSet(t *testing.T) {
 	http2Conn, edgeConn := newTestHTTP2Connection()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -74,7 +73,7 @@ func TestHTTP2ConfigurationSet(t *testing.T) {
 	require.NoError(t, err)
 
 	reqBody := []byte(`{
-"version": 2, 
+"version": 2,
 "config": {"warp-routing": {"enabled": true},  "originRequest" : {"connectTimeout": 10}, "ingress" : [ {"hostname": "test", "service": "https://localhost:8000" } , {"service": "http_status:404"} ]}}
 `)
 	reader := bytes.NewReader(reqBody)
@@ -130,7 +129,7 @@ func TestServeHTTP(t *testing.T) {
 
 	http2Conn, edgeConn := newTestHTTP2Connection()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -261,7 +260,7 @@ func (w *wsRespWriter) close() {
 func TestServeWS(t *testing.T) {
 	http2Conn, _ := newTestHTTP2Connection()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 
 	respWriter := newWSRespWriter()
 	readPipe, writePipe := io.Pipe()
@@ -301,7 +300,7 @@ func TestServeWS(t *testing.T) {
 func TestNoWriteAfterServeHTTPReturns(t *testing.T) {
 	cfdHTTP2Conn, edgeTCPConn := newTestHTTP2Connection()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
 
 	serverDone := make(chan struct{})
@@ -379,7 +378,7 @@ func TestServeControlStream(t *testing.T) {
 	)
 	http2Conn.controlStreamHandler = controlStream
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -433,7 +432,7 @@ func TestFailRegistration(t *testing.T) {
 	)
 	http2Conn.controlStreamHandler = controlStream
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -484,7 +483,7 @@ func TestGracefulShutdownHTTP2(t *testing.T) {
 
 	http2Conn.controlStreamHandler = controlStream
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -534,7 +533,7 @@ func TestGracefulShutdownHTTP2(t *testing.T) {
 }
 
 func TestServeTCP_RateLimited(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	http2Conn, edgeConn := newTestHTTP2Connection()
 
 	var wg sync.WaitGroup
@@ -566,7 +565,7 @@ func TestServeTCP_RateLimited(t *testing.T) {
 func benchmarkServeHTTP(b *testing.B, test testRequest) {
 	http2Conn, edgeConn := newTestHTTP2Connection()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(b.Context())
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
